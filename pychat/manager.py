@@ -12,14 +12,15 @@ from contextlib import contextmanager
 from enum import Enum
 
 from .client_sender import client_sender
+from .body_util import make_body
 
 me_is_pattern = re.compile(
     "^ME IS (?P<username>\w+)$")
 send_pattern = re.compile(
     "^(?:(?P<send>SEND(?P<users>( \w+)+))|(?P<broadcast>BROADCAST))$")
 
-short_pattern = '(?:$(?P<size>[0-9]{1,2})^)'
-chunk_pattern = '(?:$C(?P<size>[0-9]{1,3})^)'
+short_pattern = '(?:$(?P<body_size>[0-9]{1,2})^)'
+chunk_pattern = '(?:$C(?P<chunk_size>[0-9]{1,3})^)'
 
 body_pattern = re.compile(
     "(?P<short>{short})|(?P<chunk>{chunk})".format(
@@ -35,9 +36,11 @@ class SendMode(Enum):
 
 
 class ChatManager:
-    def __init__(self, randoms):
+    def __init__(self, randoms, verbosity, debug):
         self.chatters = {}
-        self.randoms = randoms
+        self.randoms = [make_body(r) for r in randoms]
+        self.verbosity = verbosity
+        self.debug = debug
 
     def send_message(self, sender, recipient, body_parts):
         try:
@@ -52,13 +55,16 @@ class ChatManager:
         dictionary, and remove it when the context leaves.
         '''
         if name in self.chatters:
+            writer.write('ERROR\n'.encode('ascii'))
             raise RuntimeError
-        self.chatters[name] = client_sender(writer, self.randoms)
+        else:
+            writer.write('OK\n'.encode('ascii'))
 
-        try:
-            yield
-        finally:
-            del self.chatters[name]
+            try:
+                self.chatters[name] = client_sender(writer, self.randoms)
+                yield
+            finally:
+                del self.chatters[name]
 
     @asyncio.coroutine
     def client_connected(self, reader, writer):
@@ -108,7 +114,7 @@ class ChatManager:
                     raise RuntimeError()  # TODO: add error message
                 elif match.lastgroup == 'short':
                     # Get body size
-                    size = int(match.group('size'))
+                    size = int(match.group('body_size'))
 
                     # Read body
                     body = yield from reader.readexactly(size)
@@ -117,7 +123,7 @@ class ChatManager:
                 elif match.lastgroup == 'chunk':
                     while True:
                         # Get chunk size
-                        size = int(match.group('size'))
+                        size = int(match.group('chunk_size'))
 
                         # Break on chunk size of 0
                         if size == 0:
@@ -161,7 +167,10 @@ class ChatManager:
     @asyncio.coroutine
     def serve_forever(self, ports):
         # Need 1 server for each port
-        servers = [(yield from asyncio.start_server(self.client_connected,
-            None, port)) for port in ports]
+        servers = []
+        for port in ports:
+            server = yield from asyncio.start_server(self.client_connected,
+                None, port)
+            servers.append(server.wait_closed())
 
         yield from asyncio.wait(servers)

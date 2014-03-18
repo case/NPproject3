@@ -30,7 +30,7 @@ def consumer(func):
 def client_sender(writer, randoms):
     '''
     Consumer-generator to handle writing messages to the client. Handles
-    prepending the 'send' string and injecting random messages every so often.
+    prepending the 'FROM' string and injecting random messages every so often.
     Also handles closing the writer when killed.
     '''
     with contextlib.closing(writer):

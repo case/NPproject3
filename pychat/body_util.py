@@ -6,6 +6,7 @@ Created on Mar 18, 2014
 
 from itertools import count
 
+SHORT_SIZE = 99
 CHUNK_SIZE = 999
 
 
@@ -21,7 +22,7 @@ def make_body(body):
     Create an encoded body, with correct length prefixing
     '''
     body = body.encode('ascii')
-    if len(body) <= 99:
+    if len(body) <= SHORT_SIZE:
         yield '{size}\n'.format(size=len(body)).encode('ascii')
         yield body
     else:

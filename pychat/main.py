@@ -31,7 +31,7 @@ def main():
     args = parser.parse_args()
 
     # TODO: verbose output
-    chat_manager = ChatManager(args.randoms, args.verbosity)
+    chat_manager = ChatManager(args.randoms, args.verbosity, args.debug)
 
     asyncio.get_event_loop().run_until_complete(asyncio.Task(
         chat_manager.serve_forever(args.ports)))

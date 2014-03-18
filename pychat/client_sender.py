@@ -25,7 +25,7 @@ def consumer(func):
         return f
     return wrapper
 
-
+# TODO: verbosity prints
 @consumer
 def client_sender(writer, randoms):
     '''

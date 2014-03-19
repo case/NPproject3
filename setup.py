@@ -7,9 +7,9 @@ Created on Mar 18, 2014
 from setuptools import setup
 
 setup(
-    name="pychat",
+    name="npchat",
     version="0.1.0",
-    packages=['pychat'],
+    packages=['npchat'],
     # test_suite='test',
     platforms='any',
 
@@ -35,7 +35,8 @@ setup(
 
     entry_points={
         'console_scripts': [
-            'chat_server = pychat.main:main'
+            'chat_server = npchat.server:main',
+            'pychat_server = npchat.server:main'
         ]
     }
 )

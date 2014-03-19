@@ -10,9 +10,10 @@ import asyncio
 import re
 import contextlib
 import random
+from sys import stderr
 from enum import Enum
 
-from pychat import util
+from npchat import util
 
 me_is_pattern = re.compile(
     "^ME IS (?P<username>\w+)$",
@@ -48,8 +49,16 @@ class ChatError(RuntimeError):
         return self.args[0]
 
 
+class NameExistsError(ChatError):
+    '''
+    Subclass of ChatError to enable that specific ERROR print in a non-extended
+    protocol
+    '''
+    pass
+
+
 class ChatManager:
-    def __init__(self, randoms, verbosity, debug, random_rate):
+    def __init__(self, randoms, random_rate, verbose, debug, extended):
         '''
         Initialize a chat manager
 
@@ -59,41 +68,17 @@ class ChatManager:
           `random_rate`: How many normal messages to send between randoms
         '''
         self.chatters = {}
-        self.randoms = [b''.join(util.make_body(r)) for r in randoms]
-        self.verbose = verbosity
-        self.debug = debug
         self.random_rate = random_rate
-
-    @util.consumer
-    def client_sender(self, writer):
-        '''
-        Consumer-generator to handle sending messages to clients, and also
-        injecting bonus messages
-        '''
-        # If we're using randoms
-        if self.randoms and self.random_rate > 0:
-            while True:
-                # A set would be better, but random.choice requires __getitem__
-                recent = list()
-
-                # Perform random_rate normal writes, then a random write
-                for _ in range(self.random_rate):
-                    sender, *body = yield
-                    recent.append(sender)
-                    writer.writelines(body)
-
-                writer.writelines([
-                    util.make_sender_line(random.choice(recent)),
-                    random.choice(self.randoms)])
-        else:
-            while True:
-                sender, *body = yield
-                writer.writelines(body)
+        if random_rate:
+            self.randoms = [b''.join(util.make_body(r)) for r in randoms]
+        self.verbose = verbose
+        self.debug = debug
+        self.extended = extended
 
     @contextlib.contextmanager
-    def client_context(self, name, writer):
+    def login(self, name, writer):
         '''
-        Create a client context. Insert the client_sender into the chatters
+        Attempt to login a username. Insert the client_sender into the chatters
         dictionary, and remove it when the context leaves. Raise a ChatError if
         name is already in the chatters dictionary
         '''
@@ -102,26 +87,78 @@ class ChatManager:
             writer.write('ERROR\n'.encode('ascii'))
             raise ChatError("Name {name} already exists".format(name=name))
 
-        # Add to dictionary
-        self.chatters[name] = self.client_sender(writer)
+        # Create client sender
+        @util.consumer
+        def client_sender():
+            '''
+            Consumer-generator to handle sending messages to clients, and also
+            injecting bonus messages
+            '''
+            # If we're using randoms
+            if self.random_rate > 0 and self.randoms:
+                while True:
+                    # set would be better, but random.choice needs a sequence
+                    recent = list()
 
+                    # Perform random_rate normal writes, then a random write
+                    for _ in range(self.random_rate):
+                        sender, *body = yield
+                        recent.append(sender)
+                        writer.writelines(body)
+
+                    writer.writelines([
+                        util.make_sender_line(random.choice(recent)),
+                        random.choice(self.randoms)])
+            else:
+                while True:
+                    sender, *body = yield
+                    writer.writelines(body)
+
+        # Add sender to chatters
+        self.chatters[name] = self.client_sender()
+
+        # Write acknowledgment
+        writer.write('OK\n'.encode('ascii'))
+
+        # Enter context, and remove from dictionary when leaving
         try:
-            # Write acknowledgment
-            writer.write('OK\n'.encode('ascii'))
-
-            # Enter context
             yield
         finally:
-            # When leaving the context, remove from dictionary
             del self.chatters[name]
+
+    @contextlib.contextmanager
+    def handle_errors(self, writer):
+        try:
+            yield
+
+        # Handle chat errors
+        except ChatError as e:
+            message = "ERROR: {e.message}\n".format(e=e).encode('ascii')
+            # Debug Print
+            if self.debug:
+                stderr.write(message)
+
+            # Inform client
+            if self.extended:
+                writer.write(message)
+
+            # If we're not using extended, send normal error message
+            elif isinstance(e, NameExistsError):
+                writer.write(b"ERROR\n")
+
+        # Handle other errors
+        except Exception as e:
+            if self.extended:
+                writer.write('UNKNOWN SERVER ERROR\n'.encode('ascii'))
+            raise
 
     @asyncio.coroutine
     def client_connected(self, reader, writer):
         '''
         Primary client handler coroutine. One is spawned per client connection.
         '''
-        # Ensure transport is closed at end, and print ChatErrors
-        with contextlib.closing(writer):
+        # Ensure transport is closed at end, and handle errors
+        with contextlib.closing(writer), self.handle_errors(writer):
 
             # Get the ME IS line
             line = yield from reader.readline()

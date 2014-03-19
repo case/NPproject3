@@ -5,6 +5,7 @@ Created on Mar 18, 2014
 '''
 
 from itertools import count
+from functools import wraps
 
 SHORT_SIZE = 99
 CHUNK_SIZE = 999
@@ -31,4 +32,16 @@ def make_body(body):
             chunk = body[i:i + CHUNK_SIZE]
             yield 'C{size}\n'.format(size=len(chunk)).encode('ascii')
             yield chunk
-        yield b'C0'
+        yield b'C0\n'
+
+
+def consumer(func):
+    '''
+    Immediately advance a generator to the first yield.
+    '''
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        f = func(*args, **kwargs)
+        next(f)
+        return f
+    return wrapper

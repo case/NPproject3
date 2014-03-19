@@ -9,11 +9,10 @@ This class manages creating the client instances and forwarding messages
 import asyncio
 import re
 import contextlib
-from sys import stderr
+import random
 from enum import Enum
 
-from .client_sender import client_sender
-from .body_util import make_body
+from pychat import util
 
 me_is_pattern = re.compile(
     "^ME IS (?P<username>\w+)$",
@@ -50,19 +49,46 @@ class ChatError(RuntimeError):
 
 
 class ChatManager:
-    def __init__(self, randoms, verbosity, debug):
+    def __init__(self, randoms, verbosity, debug, random_rate):
+        '''
+        Initialize a chat manager
+
+          `randoms`: the list of random phrases to inject
+          `verbosity`: True for verbose output
+          `debug`: True for debug output
+          `random_rate`: How many normal messages to send between randoms
+        '''
         self.chatters = {}
-        self.randoms = [b''.join(make_body(r)) for r in randoms]
+        self.randoms = [b''.join(util.make_body(r)) for r in randoms]
         self.verbose = verbosity
         self.debug = debug
+        self.random_rate = random_rate
 
-        self.debug_print(
-            "Created chat manager with randoms:\n\t{randoms}".format(
-                randoms='\n\t'.join(randoms)))
+    @util.consumer
+    def client_sender(self, writer):
+        '''
+        Consumer-generator to handle sending messages to clients, and also
+        injecting bonus messages
+        '''
+        # If we're using randoms
+        if self.randoms and self.random_rate > 0:
+            while True:
+                # A set would be better, but random.choice requires __getitem__
+                recent = list()
 
-    def debug_print(self, *what):
-        if(self.debug):
-            print(*what, file=stderr)
+                # Perform random_rate normal writes, then a random write
+                for _ in range(self.random_rate):
+                    sender, *body = yield
+                    recent.append(sender)
+                    writer.writelines(body)
+
+                writer.writelines([
+                    util.make_sender_line(random.choice(recent)),
+                    random.choice(self.randoms)])
+        else:
+            while True:
+                sender, *body = yield
+                writer.writelines(body)
 
     @contextlib.contextmanager
     def client_context(self, name, writer):
@@ -74,37 +100,20 @@ class ChatManager:
         # If name already exists, send error and throw
         if name in self.chatters:
             writer.write('ERROR\n'.encode('ascii'))
-            raise ChatError("Name {name} already exiists".format(name=name))
+            raise ChatError("Name {name} already exists".format(name=name))
 
-        # Add to dictionary and enter context
+        # Add to dictionary
+        self.chatters[name] = self.client_sender(writer)
+
         try:
-            # Add to dictionary
-            self.debug_print("Adding {name} to chatters".format(name=name))
-            self.chatters[name] = client_sender(writer, self.randoms)
-
-            # Send acknowledgment
+            # Write acknowledgment
             writer.write('OK\n'.encode('ascii'))
 
             # Enter context
             yield
         finally:
             # When leaving the context, remove from dictionary
-            self.debug_print("Removing {name} from chatters".format(name=name))
             del self.chatters[name]
-
-    @contextlib.contextmanager
-    def handle_chat_errors(self, handle=True):
-        '''
-        Context manager to catch ChatErrors and debug_print the message. If
-        handle is False, they are reraised, allowing complete tracebacks
-        '''
-        try:
-            yield
-        except ChatError as e:
-            if handle:
-                self.debug_print("Error: {e.message}".format(e=e))
-            else:
-                raise
 
     @asyncio.coroutine
     def client_connected(self, reader, writer):
@@ -112,8 +121,7 @@ class ChatManager:
         Primary client handler coroutine. One is spawned per client connection.
         '''
         # Ensure transport is closed at end, and print ChatErrors
-        with self.handle_chat_errors(), contextlib.closing(writer):
-            self.debug_print("Client connected")
+        with contextlib.closing(writer):
 
             # Get the ME IS line
             line = yield from reader.readline()
@@ -142,22 +150,17 @@ class ChatManager:
             # If no data was received, assume connection was closed
             if not line:
                 break
-            # TODO: find out if asyncio has a better way to detect this
-
-            match = send_pattern.match(line.decode('ascii'))
 
             # Parse the send line
+            match = send_pattern.match(line.decode('ascii'))
             if match is None:
                 raise ChatError("Malformed send line")
 
             elif match.lastgroup == 'send':
                 mode = SendMode.send
                 recipients = match.group('users').split()
-                self.debug_print("Got SEND line\n\t{recipients}".format(
-                    recipients='\n\t'.join(recipients)))
 
             elif match.lastgroup == 'broadcast':
-                self.debug_print("Got BROADCAST line")
                 mode = SendMode.broadcast
 
             else:
@@ -165,18 +168,18 @@ class ChatManager:
 
             # Get the first body header line
             line = yield from reader.readline()
+
+            # Parse body header line
             match = body_pattern.match(line.decode('ascii'))
-
-            body_parts = [line]
-
             if match is None:
                 raise ChatError("Malformed body header")
 
-            elif match.lastgroup == 'short':
+            body_parts = [util.make_sender_line(name), line]
+
+            # Read body
+            if match.lastgroup == 'short':
                 # Get body size
                 size = int(match.group('body_size'))
-                self.debug_print(
-                    "Reading body of size {size}".format(size=size))
 
                 # Read body
                 body = yield from reader.readexactly(size)
@@ -186,8 +189,6 @@ class ChatManager:
                 while True:
                     # Get chunk size
                     size = int(match.group('chunk_size'))
-                    self.debug_print(
-                        "Reading chunk of size {size}".format(size=size))
 
                     # Break on chunk size of 0
                     if size == 0:
@@ -209,15 +210,15 @@ class ChatManager:
                 raise ChatError("Unknown Server Error")
 
             # Construct the message for client_sender
-            message = (name, body_parts)
+            message = (name, ''.join(body_parts))
 
             # Send the message to a list of recipients
             if mode is SendMode.send:
-                recipients = (r for r in recipients if r in self.chatters)
+                recipients = filter(lambda r: r in self.chatters, recipients)
 
             # Send the message to everyone (but ourselves)
             elif mode is SendMode.broadcast:
-                recipients = (r for r in self.chatters if name is not r)
+                recipients = filter(lambda r: name is not r, self.chatters)
 
             # Something went wrong with the mode?
             else:
@@ -225,20 +226,18 @@ class ChatManager:
 
             for recipient in recipients:
                 self.chatters[recipient].send(message)
-                self.debug_print(
-                    "Sent to {recipient}".format(recipient=recipient))
 
     @asyncio.coroutine
     def serve_forever(self, ports):
-        self.debug_print("Launching server")
 
         servers = []
         for port in ports:
             # Need 1 server for each port
-            self.debug_print("Listening on port", port)
+            # Start listening
             server = yield from asyncio.start_server(
                 self.client_connected, None, port)
+
+            # Get the listener task
             servers.append(server.wait_closed())
 
-        self.debug_print("Serving")
         yield from asyncio.wait(servers)

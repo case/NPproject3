@@ -11,36 +11,29 @@ import re
 import contextlib
 import random
 from sys import stderr
-from enum import Enum
 
 from npchat import util
 
-me_is_pattern = re.compile(
-    "^ME IS (?P<username>\w+)$",
-    re.IGNORECASE)
-send_pattern = re.compile(
-    "^(?:(?P<send>SEND(?P<users>( \w+)+))|(?P<broadcast>BROADCAST))$",
-    re.IGNORECASE)
 
-short_pattern = '(?P<body_size>[0-9]{1,2})'
-chunk_pattern = 'C(?P<chunk_size>[0-9]{1,3})'
+def selector(**patterns):
+    return '|'.join('(?P<{name}>{pattern})'.format(name=name, pattern=pattern)
+        for name, pattern in patterns.items())
+
+me_is_pattern = re.compile("ME IS (?P<username>\w+)\s*\Z", re.I)
+
+action_pattern = re.compile(
+    selector(
+        send="SEND(?P<users>( \w+)+)\s*\Z",
+        broadcast="BROADCAST\s*\Z"),
+    re.I)
+
+
+short_pattern = re.compile('(?P<body_size>[0-9]{1,2})\s*\Z', re.I)
+chunk_pattern = re.compile('C(?P<chunk_size>[0-9]{1,3})\s*\Z', re.I)
 
 body_pattern = re.compile(
-    "^(?:(?P<short>{short})|(?P<chunk>{chunk}))$".format(
-        short=short_pattern, chunk=chunk_pattern),
-    re.IGNORECASE)
-
-short_pattern = re.compile(
-    "^{short}$".format(short=short_pattern),
-    re.IGNORECASE)
-chunk_pattern = re.compile(
-    "^{chunk}$".format(chunk=chunk_pattern),
-    re.IGNORECASE)
-
-
-class SendMode(Enum):
-    send = 1
-    broadcast = 2
+    selector(chunk=chunk_pattern.pattern, short=short_pattern.pattern),
+    re.I)
 
 
 class ChatError(RuntimeError):
@@ -52,9 +45,11 @@ class ChatError(RuntimeError):
 class NameExistsError(ChatError):
     '''
     Subclass of ChatError to enable that specific ERROR print in a non-extended
-    protocol
+    protocol. It only has the name, and dynamically emits a message
     '''
-    pass
+    @property
+    def message(self):
+        return "Name {name} already exists".format(name=self.args[0])
 
 
 class ChatManager:
@@ -70,22 +65,74 @@ class ChatManager:
         self.chatters = {}
         self.random_rate = random_rate
         if random_rate:
-            self.randoms = [b''.join(util.make_body(r)) for r in randoms]
+            self.randoms = [b''.join(util.make_body(r + '\n'))
+                for r in randoms]
         self.verbose = verbose
         self.debug = debug
         self.extended = extended
 
+    def debug_print(self, message):
+        if(self.debug):
+            stderr.write(message)
+
+    @contextlib.contextmanager
+    def handle_errors(self, writer):
+        try:
+            yield
+
+        # Handle chat errors
+        except ChatError as e:
+            message = "ERROR: {e.message}\n".format(e=e)
+            # Debug Print
+            self.debug_print(message)
+
+            # Inform client
+            if self.extended:
+                writer.write(message.encode('ascii'))
+
+            # If we're not using extended, send normal error message
+            elif isinstance(e, NameExistsError):
+                writer.write("ERROR\n".encode('ascii'))
+
+        # Inform client of other errors and reraise
+        except Exception as e:
+            if self.extended:
+                writer.write('UNKNOWN SERVER ERROR\n'.encode('ascii'))
+            raise
+
+    @asyncio.coroutine
+    def client_connected(self, reader, writer):
+        '''
+        Primary client handler coroutine. One is spawned per client connection.
+        '''
+        self.debug_print("Client Connected\n")
+        # Ensure transport is closed at end, and handle errors
+        with contextlib.closing(writer), self.handle_errors(writer):
+
+            # Get the ME IS line
+            line = yield from reader.readline()
+            match = me_is_pattern.match(line.decode('ascii'))
+
+            # Get the username
+            if match is None:
+                raise ChatError("Malformed ME IS line")
+
+            name = match.group('username')
+
+            # Add self to the client list, and remove when done
+            with self.login(name, writer):
+                yield from self.core_loop(name, reader)
+
     @contextlib.contextmanager
     def login(self, name, writer):
         '''
-        Attempt to login a username. Insert the client_sender into the chatters
+        Attempt to login a username. Insert the client into the chatters
         dictionary, and remove it when the context leaves. Raise a ChatError if
         name is already in the chatters dictionary
         '''
         # If name already exists, send error and throw
         if name in self.chatters:
-            writer.write('ERROR\n'.encode('ascii'))
-            raise ChatError("Name {name} already exists".format(name=name))
+            raise NameExistsError(name)
 
         # Create client sender
         @util.consumer
@@ -102,77 +149,32 @@ class ChatManager:
 
                     # Perform random_rate normal writes, then a random write
                     for _ in range(self.random_rate):
-                        sender, *body = yield
+                        sender, body = yield
                         recent.append(sender)
-                        writer.writelines(body)
+                        writer.write(body)
 
                     writer.writelines([
                         util.make_sender_line(random.choice(recent)),
                         random.choice(self.randoms)])
             else:
                 while True:
-                    sender, *body = yield
-                    writer.writelines(body)
+                    sender, body = yield
+                    writer.write(body)
 
         # Add sender to chatters
-        self.chatters[name] = self.client_sender()
+        self.chatters[name] = client_sender()
 
         # Write acknowledgment
         writer.write('OK\n'.encode('ascii'))
+
+        self.debug_print("Logged in user {name}\n".format(name=name))
 
         # Enter context, and remove from dictionary when leaving
         try:
             yield
         finally:
             del self.chatters[name]
-
-    @contextlib.contextmanager
-    def handle_errors(self, writer):
-        try:
-            yield
-
-        # Handle chat errors
-        except ChatError as e:
-            message = "ERROR: {e.message}\n".format(e=e).encode('ascii')
-            # Debug Print
-            if self.debug:
-                stderr.write(message)
-
-            # Inform client
-            if self.extended:
-                writer.write(message)
-
-            # If we're not using extended, send normal error message
-            elif isinstance(e, NameExistsError):
-                writer.write(b"ERROR\n")
-
-        # Handle other errors
-        except Exception as e:
-            if self.extended:
-                writer.write('UNKNOWN SERVER ERROR\n'.encode('ascii'))
-            raise
-
-    @asyncio.coroutine
-    def client_connected(self, reader, writer):
-        '''
-        Primary client handler coroutine. One is spawned per client connection.
-        '''
-        # Ensure transport is closed at end, and handle errors
-        with contextlib.closing(writer), self.handle_errors(writer):
-
-            # Get the ME IS line
-            line = yield from reader.readline()
-            match = me_is_pattern.match(line.decode('ascii'))
-
-            # Get the username
-            if match is None:
-                raise ChatError("Malformed ME IS line")
-
-            name = match.group('username')
-
-            # Add self to the client list, and remove when done
-            with self.client_context(name, writer):
-                yield from self.core_loop(name, reader)
+            self.debug_print("Logged out user {name}\n".format(name=name))
 
     @asyncio.coroutine
     def core_loop(self, name, reader):
@@ -188,93 +190,92 @@ class ChatManager:
             if not line:
                 break
 
-            # Parse the send line
-            match = send_pattern.match(line.decode('ascii'))
+            # Match the action and execute
+            match = action_pattern.match(line.decode('ascii'))
             if match is None:
                 raise ChatError("Malformed send line")
 
             elif match.lastgroup == 'send':
-                mode = SendMode.send
-                recipients = match.group('users').split()
+                yield from self.read_and_send(name, reader,
+                    (r for r in match.group('users').split()
+                     if r in self.chatters))
 
             elif match.lastgroup == 'broadcast':
-                mode = SendMode.broadcast
+                yield from self.read_and_send(name, reader,
+                    (r for r in self.chatters if r != name))
 
             else:
-                raise ChatError("Unknown Server Error")
+                raise ChatError("Action Not Implemented")
 
-            # Get the first body header line
-            line = yield from reader.readline()
+    @asyncio.coroutine
+    def read_and_send(self, name, reader, recipients):
+        '''
+        Read a body and send to a list of recipients. This is a coroutine, so
+        the list should be generated lazily, such that it isn't evaluated until
+        the actual sends, at the end, in case users log out during a context
+        switch
+        '''
+        # Get the first body header line
+        line = yield from reader.readline()
 
-            # Parse body header line
-            match = body_pattern.match(line.decode('ascii'))
-            if match is None:
-                raise ChatError("Malformed body header")
+        # Parse body header line
+        match = body_pattern.match(line.decode('ascii'))
+        if match is None:
+            raise ChatError("Malformed body header")
 
-            body_parts = [util.make_sender_line(name), line]
+        body_parts = [util.make_sender_line(name), line]
+
+        # Read body
+        if match.lastgroup == 'short':
+            # Get body size
+            size = int(match.group('body_size'))
 
             # Read body
-            if match.lastgroup == 'short':
-                # Get body size
-                size = int(match.group('body_size'))
+            body = yield from reader.readexactly(size)
+            body_parts.append(body)
 
-                # Read body
-                body = yield from reader.readexactly(size)
-                body_parts.append(body)
+        elif match.lastgroup == 'chunk':
+            while True:
+                # Get chunk size
+                size = int(match.group('chunk_size'))
 
-            elif match.lastgroup == 'chunk':
-                while True:
-                    # Get chunk size
-                    size = int(match.group('chunk_size'))
+                # Break on chunk size of 0
+                if size == 0:
+                    break
 
-                    # Break on chunk size of 0
-                    if size == 0:
-                        break
+                # Read chunk
+                chunk = yield from reader.readexactly(size)
+                body_parts.append(chunk)
 
-                    # Read chunk
-                    chunk = yield from reader.readexactly(size)
-                    body_parts.append(chunk)
+                # Get next chunk line
+                line = yield from reader.readline()
+                match = chunk_pattern.match(line.decode('ascii'))
+                if match is None:
+                    raise ChatError("Malformed chunk header")
 
-                    # Get next chunk line
-                    line = yield from reader.readline()
-                    match = chunk_pattern.match(line.decode('ascii'))
-                    if match is None:
-                        raise ChatError("Malformed chunk header")
+                # Add chunk line to body
+                body_parts.append(line)
+        else:
+            raise ChatError("Unknown Server Error")
 
-                    # Add chunk line to body
-                    body_parts.append(line)
-            else:
-                raise ChatError("Unknown Server Error")
+        # Construct the message for client_sender
+        message = (name, b''.join(body_parts))
 
-            # Construct the message for client_sender
-            message = (name, ''.join(body_parts))
-
-            # Send the message to a list of recipients
-            if mode is SendMode.send:
-                recipients = filter(lambda r: r in self.chatters, recipients)
-
-            # Send the message to everyone (but ourselves)
-            elif mode is SendMode.broadcast:
-                recipients = filter(lambda r: name is not r, self.chatters)
-
-            # Something went wrong with the mode?
-            else:
-                raise ChatError("Unknown Server Error")
-
-            for recipient in recipients:
-                self.chatters[recipient].send(message)
+        # Send to each recipient
+        for recipient in recipients:
+            self.chatters[recipient].send(message)
 
     @asyncio.coroutine
     def serve_forever(self, ports):
-
         servers = []
         for port in ports:
             # Need 1 server for each port
-            # Start listening
             server = yield from asyncio.start_server(
                 self.client_connected, None, port)
 
             # Get the listener task
             servers.append(server.wait_closed())
+
+            self.debug_print("Listening on port {n}\n".format(n=port))
 
         yield from asyncio.wait(servers)

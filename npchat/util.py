@@ -4,7 +4,6 @@ Created on Mar 18, 2014
 @author: nathan
 '''
 
-from itertools import count
 from functools import wraps
 
 SHORT_SIZE = 99
@@ -27,21 +26,24 @@ def make_body(body):
         yield '{size}\n'.format(size=len(body)).encode('ascii')
         yield body
     else:
+        # Prevent unnecessary copies with memoryview.
+        # Look, kids! Python can do arrays via pointer manipulation, too!
         body = memoryview(body)
-        for i in count(0, CHUNK_SIZE):
+        for i in range(0, len(body), CHUNK_SIZE):
             chunk = body[i:i + CHUNK_SIZE]
             yield 'C{size}\n'.format(size=len(chunk)).encode('ascii')
             yield chunk
-        yield b'C0\n'
+        yield 'C0\n'.encode('ascii')
 
 
-def consumer(func):
+def consumer(generator):
     '''
-    Immediately advance a generator to the first yield.
+    Immediately advance a generator to the first yield. Attach to generators
+    that consume data via send.
     '''
-    @wraps(func)
+    @wraps(generator)
     def wrapper(*args, **kwargs):
-        f = func(*args, **kwargs)
-        next(f)
-        return f
+        g = generator(*args, **kwargs)
+        next(g)
+        return g
     return wrapper

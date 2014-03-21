@@ -17,11 +17,11 @@ def make_sender_line(name):
     return 'FROM {name}\n'.format(name=name).encode('ascii')
 
 
-def make_body(body):
+def make_body(*body):
     '''
     Create an encoded body, with correct length prefixing
     '''
-    body = body.encode('ascii')
+    body = ''.join(body).encode('ascii')
     if len(body) <= SHORT_SIZE:
         yield '{size}\n'.format(size=len(body)).encode('ascii')
         yield body
@@ -34,6 +34,30 @@ def make_body(body):
             yield 'C{size}\n'.format(size=len(chunk)).encode('ascii')
             yield chunk
         yield 'C0\n'.encode('ascii')
+
+
+def assemble_full_body(sender_line, body_parts):
+    '''
+    Concatenate a sender line and body. Performs no formatting. Designed to be
+    used with make_sender_line and make_body.
+    '''
+    yield sender_line
+    yield from body_parts
+
+
+def prepare_full_body(name, body_parts):
+    '''
+    Add a sender line to some body parts. Designed to be used with just
+    make_body
+    '''
+    return assemble_full_body(make_sender_line(name), body_parts)
+
+
+def make_full_body(name, *body):
+    '''
+    Encode a sender line and body.
+    '''
+    return prepare_full_body(name, make_body(*body))
 
 
 def consumer(generator):

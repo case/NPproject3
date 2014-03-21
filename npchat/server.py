@@ -12,12 +12,21 @@ from npchat.manager import ChatManager
 default_randoms = (
     "Hey, you're kinda hot",
     "No way!",
-    "I like Justin Bieber....a lot")
+    "I like Justin Bieber....a lot",
+    "You butt",
+    "GOOD",
+    "I'm not touching yours, I'm only touching mine",
+    "I want you to lose so hard you go inactive",
+    "Philadelphia is the worst state in the world",
+    "BIG\tBLACK\tDICK",
+    "i'm all about three things, getting money, getting pussy, and the dewey "
+        "decimal system")
 
 
 def main():
     parser = ArgumentParser(
         description="Network Programming Project 3: Chat Server")
+
     parser.add_argument('-v', "--verbose", action='store_true',
         help="Enable standard verbose output")
     parser.add_argument('-d', "--debug", action='store_true',

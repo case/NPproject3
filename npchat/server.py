@@ -18,8 +18,7 @@ default_randoms = (
     "I'm not touching yours, I'm only touching mine",
     "I want you to lose so hard you go inactive",
     "Philadelphia is the worst state in the world",
-    "BIG\tBLACK\tDICK",
-    "i'm all about three things, getting money, getting pussy, and the dewey "
+    "i'm all about three things, getting money, getting love, and the dewey "
         "decimal system")
 
 
